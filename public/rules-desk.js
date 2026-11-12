@@ -1,6 +1,6 @@
 // Host rules desk: compose typed effects, preview the server's own evaluation, then publish.
 // The browser only assembles a small declarative list; all validation and execution is server-side.
-import { $, text, node, confirmDialog } from './ui.js?v=1.0.0';
+import { $, text, node, confirmDialog } from './ui.js?v=1.0.1';
 
 export function createRulesDesk({ getRoom, rpc, send, isLocked }) {
   const desk = { effects: [], catalog: null, proposal: null, corrects: null, caveats: [], previewKey: '', preview: null, busy: false };

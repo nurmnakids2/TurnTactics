@@ -1,7 +1,7 @@
 // Notification settings. The browser permission prompt appears ONLY after the user presses
 // "Turn on notifications". An in-app preference is never treated as browser permission.
-import { $, text, node } from './ui.js?v=1.0.0';
-import { VAPID_PUBLIC_KEY } from './push-config.js?v=1.0.0';
+import { $, text, node } from './ui.js?v=1.0.1';
+import { VAPID_PUBLIC_KEY } from './push-config.js?v=1.0.1';
 
 const LABELS = {
   income: 'Daily income', dm: 'Direct messages', eliminated: 'Your elimination',

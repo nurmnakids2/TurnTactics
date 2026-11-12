@@ -1,14 +1,14 @@
 // Turn Tactics client. The server is the only authority: this file renders server snapshots and
 // sends explicit, idempotent requests. Nothing here decides a game outcome.
-import { $, text, node, plural, icon, hydrateIcons, safeIcon, confirmDialog, copyText } from './ui.js?v=1.0.0';
-import { crestElement, crestName, square, fileLabel, rankLabel } from './crest.js?v=1.0.0';
-import { createChat } from './chat.js?v=1.0.0';
-import { createAccount } from './account.js?v=1.0.0';
-import { createNotifications } from './notify.js?v=1.0.0';
-import { createRulesDesk } from './rules-desk.js?v=1.0.0';
+import { $, text, node, plural, icon, hydrateIcons, safeIcon, confirmDialog, copyText } from './ui.js?v=1.0.1';
+import { crestElement, crestName, square, fileLabel, rankLabel } from './crest.js?v=1.0.1';
+import { createChat } from './chat.js?v=1.0.1';
+import { createAccount } from './account.js?v=1.0.1';
+import { createNotifications } from './notify.js?v=1.0.1';
+import { createRulesDesk } from './rules-desk.js?v=1.0.1';
 import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY } from './online-config.js';
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.0.1';
 const CURRENT_RULES = 'owner-2026-11';
 const state = { db: null, room: null, busy: false, pending: null, view: 'field', selected: null, cell: null, focus: null, zoom: null,
   stale: false, icon: null, iconReading: false, iconVersion: 0, boardKey: '', centerPending: false, account: null };
@@ -564,6 +564,10 @@ async function start() {
     navigator.serviceWorker.addEventListener('message', (e) => { if (e.data?.type === 'tt-open' && typeof e.data.url === 'string') applyLink(e.data.url); });
   }
   if (!SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY) { text('homeFeedback', 'Connection settings are missing. Keep your existing online-config.js beside these files.'); return; }
+  // A failed email link (expired, or already opened by a mail scanner) comes back as #error=…. It is explained
+  // below and removed here first, because the Auth library ends the current session when it finds one.
+  const linkFailed = /(^#|&)error(_code|_description)?=/.test(location.hash);
+  if (linkFailed) history.replaceState(null, '', location.pathname + location.search);
   try {
     const { createClient } = await import('https://esm.sh/@supabase/supabase-js@2.49.1');
     state.db = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
@@ -572,7 +576,8 @@ async function start() {
   desk = createRulesDesk({ getRoom: () => state.room, rpc, send, isLocked: () => locked() || state.stale });
   notifications = createNotifications({ rpc, isSignedIn: () => !!state.account?.user });
   accounts = createAccount({ db: state.db, rpc, onChange: onAccount, getRememberedRoom: () => store.get('tt-online-room') });
-  const account = await accounts.refresh(); text('homeFeedback', account.status === 'backendPending' ? $('homeFeedback').textContent : '');
+  const account = await accounts.refresh();
+  text('homeFeedback', account.status === 'backendPending' ? $('homeFeedback').textContent : linkFailed ? 'That email link has expired or was already used. If your account is already confirmed, just sign in. Otherwise create the account again, or use “Forgot your password?”, to get a new link.' : '');
   if (account.user && !applyLink(location.href)) { const last = store.get('tt-online-room'); if (last) await openRoom(last); }
   else if (!account.user) applyLink(location.href);
   if (location.search) history.replaceState(null, '', location.pathname);

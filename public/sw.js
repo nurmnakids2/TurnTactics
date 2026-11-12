@@ -3,7 +3,7 @@
 //   an old copy can never be pinned. The cache is only an offline fallback for the app shell.
 // - Never touches cross-origin requests (Supabase API/auth/functions) and never caches them.
 // - Receives generic push messages and routes notification clicks to same-origin pages only.
-const VERSION = 'tt-shell-1.0.0';
+const VERSION = 'tt-shell-1.0.1';
 const SHELL = ['./online.html', './tactics-ui.css', './theme.js', './online.js', './chat.js', './ui.js', './crest.js', './account.js',
   './notify.js', './rules-desk.js', './online-config.js', './push-config.js', './online.webmanifest', './icons/icon.svg', './icons/icon-192.png'];
 

@@ -13,8 +13,8 @@
 <link rel="manifest" href="./online.webmanifest">
 <link rel="icon" href="./icons/icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="./icons/icon-180.png">
-<script src="./theme.js?v=1.0.0"></script>
-<link rel="stylesheet" href="./tactics-ui.css?v=1.0.0">
+<script src="./theme.js?v=1.0.1"></script>
+<link rel="stylesheet" href="./tactics-ui.css?v=1.0.1">
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -71,20 +71,22 @@
         </form>
         <form id="registerForm" role="tabpanel" aria-labelledby="tabRegister" hidden>
           <p id="guestUpgradeNote" class="notice" hidden>This browser holds a guest identity from an earlier version. Creating the account here keeps its seats, images, proposals and messages.</p>
-          <label for="regEmail">Email <span class="hint">· for confirmation and password recovery</span></label>
-          <input id="regEmail" type="email" required autocomplete="email" maxlength="254">
-          <label for="regUsername">Username <span class="hint">· 3–20 letters, numbers, underscores</span></label>
+          <label for="regUsername">Username <span class="hint">· 3–20 letters, numbers, underscores · you sign in with it</span></label>
           <input id="regUsername" required autocomplete="username" autocapitalize="none" spellcheck="false" pattern="[A-Za-z0-9_]{3,20}" maxlength="20">
           <label for="regDisplay">Display name <span class="hint">· what rooms call you by default</span></label>
           <input id="regDisplay" required autocomplete="nickname" maxlength="24">
           <label for="regPassword">Password <span class="hint">· at least 8 characters</span></label>
           <input id="regPassword" type="password" required autocomplete="new-password" minlength="8" maxlength="200">
+          <label for="regEmail">Email <span class="hint">· optional</span></label>
+          <input id="regEmail" type="email" autocomplete="email" maxlength="254" aria-describedby="regEmailHint">
+          <p id="regEmailHint" class="hint">Recommended: an email is the only way to reset a forgotten password. You can play without one.</p>
           <button class="primary wide" type="submit">Create account</button>
         </form>
         <form id="resetForm" hidden>
           <h2>Reset your password</h2>
           <label for="resetEmail">Account email</label>
           <input id="resetEmail" type="email" required autocomplete="email" maxlength="254">
+          <p class="hint">An account made without an email cannot be reset here. Ask your host to set a new password for it.</p>
           <button class="primary wide" type="submit">Email me a reset link</button>
           <button type="button" id="cancelReset" class="text-button">Back to sign in</button>
         </form>
@@ -360,6 +362,6 @@
     <div class="dialog-actions"><button value="cancel">Not yet</button><button id="dialogConfirm" value="confirm" class="primary">Confirm</button></div>
   </form>
 </dialog>
-<script type="module" src="./online.js?v=1.0.0"></script>
+<script type="module" src="./online.js?v=1.0.1"></script>
 </body>
 </html>

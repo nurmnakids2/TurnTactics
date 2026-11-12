@@ -1,7 +1,7 @@
 // Seat-scoped conversations: one room channel plus participant-only direct messages.
 // Game state and the Official Dispatch are untouched by anything here. Messages are sent as
 // typed; nothing is rewritten or passed to any third party.
-import { $, node, icon } from './ui.js?v=1.0.0';
+import { $, node, icon } from './ui.js?v=1.0.1';
 
 export function createChat({ getRoom, rpc, avatar }) {
   const peerKey = (p) => (p === null ? 'room' : String(p));

@@ -1,6 +1,7 @@
 // End-to-end browser test: the REAL frontend in headless Chrome against the REAL SQL in the local
 // PostgreSQL ("tt", built by tests/db/release.sh). Only Supabase Auth and its HTTP transport are
-// replaced: a stub client forwards each RPC to psql with the caller's user id as the JWT subject.
+// replaced: a stub client forwards each RPC to psql with the caller's user id as the JWT subject,
+// and a small stand-in answers sign-up, sign-in and guest upgrade the way Supabase Auth does.
 // So this exercises the UI and the database functions together, but NOT Supabase Auth, PostgREST,
 // Edge Functions or real push delivery.
 // Run: tests/db/pg.sh start && tests/db/baseline.sh && tests/db/release.sh && node tests/e2e/run.mjs
@@ -39,12 +40,54 @@ function account(name) {
   return id;
 }
 
+// ---------- Supabase Auth stand-in ----------
+// Answers copied from a real Auth server (supabase/auth v2.197). “Confirm email” off: a sign-up signs in at once
+// and a guest gains an address immediately. On, with the built-in mailer: an address it may not write to is
+// refused and nothing is stored. Passwords live only in this process.
+const identities = new Map(), authMode = { confirmEmail: false };
+const authError = (message, code, status = 400) => ({ error: { message, code, status } });
+function authCall({ action, uid, email, password, data }) {
+  const idOf = (address) => sql(`select id from auth.users where email = ${lit(address)}`);
+  const unsendable = () => authError(`Email address "${email}" cannot be used as it is not authorized`, 'email_address_not_authorized');
+  if (action === 'signUp') {
+    if (authMode.confirmEmail) return unsendable();
+    if (idOf(email)) return authError('User already registered', 'user_already_exists', 422);
+    const id = randomUUID(); sql(`insert into auth.users(id, email) values ('${id}', ${lit(email)})`); identities.set(id, { password, meta: data || {} });
+    return { user: { id, email, is_anonymous: false, user_metadata: data || {} }, session: true };
+  }
+  if (action === 'signIn') {
+    const id = idOf(email), known = identities.get(id);
+    return known && known.password === password ? { user: { id, email, is_anonymous: false, user_metadata: known.meta }, session: true } : authError('Invalid login credentials', 'invalid_credentials');
+  }
+  if (action === 'update') {
+    let [current, anonymous] = sql(`select coalesce(email, '') || '|' || is_anonymous::int from auth.users where id = ${lit(uid)}`).split('|');
+    const known = identities.get(uid) || { meta: {} };
+    if (email && email !== current) {
+      if (authMode.confirmEmail) return unsendable();
+      if (idOf(email)) return authError('A user with this email address has already been registered', 'email_exists', 422);
+      sql(`update auth.users set email = ${lit(email)}, is_anonymous = false where id = ${lit(uid)}`); current = email; anonymous = '0';
+    } else if (password && anonymous === '1') return authError('Updating password of an anonymous user without an email or phone is not allowed', 'validation_failed', 422);
+    if (password) known.password = password;
+    Object.assign(known.meta, data); identities.set(uid, known);
+    return { user: { id: uid, email: current, is_anonymous: anonymous === '1', user_metadata: known.meta }, session: true };
+  }
+  return authError('Unsupported by the test stand-in', 'e2e');
+}
+
 // ---------- static server with the auth/transport stub ----------
-const STUB = `export const createClient = () => { const uid = localStorage.getItem('e2e-user');
-  const user = uid ? { id: uid, is_anonymous: localStorage.getItem('e2e-anon') === '1', user_metadata: {} } : null;
-  return { auth: { getSession: async () => ({ data: { session: user ? { user } : null } }), onAuthStateChange: () => ({ data: { subscription: { unsubscribe() {} } } }),
-      signOut: async () => { localStorage.removeItem('e2e-user'); return {}; } },
-    rpc: async (name, args) => { try { const r = await fetch('/__rpc', { method: 'POST', body: JSON.stringify({ uid, name, args }) }); return await r.json(); }
+const STUB = `export const createClient = () => { window.__hashAtAuthStart = location.hash;
+  const KEYS = ['e2e-user', 'e2e-anon', 'e2e-email', 'e2e-meta'], uid = () => localStorage.getItem('e2e-user');
+  const session = () => (uid() ? { user: { id: uid(), is_anonymous: localStorage.getItem('e2e-anon') === '1', email: localStorage.getItem('e2e-email') || undefined, user_metadata: JSON.parse(localStorage.getItem('e2e-meta') || '{}') } } : null);
+  const adopt = (user) => { localStorage.setItem('e2e-user', user.id); localStorage.setItem('e2e-anon', user.is_anonymous ? '1' : '0'); localStorage.setItem('e2e-email', user.email || ''); localStorage.setItem('e2e-meta', JSON.stringify(user.user_metadata || {})); };
+  const auth = async (action, body) => { const r = await (await fetch('/__auth', { method: 'POST', body: JSON.stringify({ action, uid: uid(), ...body }) })).json();
+    if (r.error) return { data: { user: null, session: null }, error: r.error };
+    adopt(r.user); return { data: { user: r.user, session: session() }, error: null }; };
+  return { auth: { getSession: async () => ({ data: { session: session() } }), onAuthStateChange: () => ({ data: { subscription: { unsubscribe() {} } } }),
+      signOut: async () => { KEYS.forEach((key) => localStorage.removeItem(key)); return {}; },
+      signUp: ({ email, password, options }) => auth('signUp', { email, password, data: options && options.data }),
+      signInWithPassword: ({ email, password }) => auth('signIn', { email, password }),
+      updateUser: (changes) => auth('update', changes) },
+    rpc: async (name, args) => { try { const r = await fetch('/__rpc', { method: 'POST', body: JSON.stringify({ uid: uid(), name, args }) }); return await r.json(); }
       catch (e) { return { data: null, error: { message: 'TypeError: Failed to fetch', code: '' } }; } } }; };`;
 const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.webmanifest': 'application/manifest+json' };
 const server = http.createServer((req, res) => {
@@ -58,6 +101,9 @@ const server = http.createServer((req, res) => {
       if (fault?.kind === 'delay' && (!fault.match || fault.match(args))) await new Promise((r) => setTimeout(r, fault.ms));
       res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(payload));
     }); return;
+  }
+  if (url.pathname === '/__auth') {
+    let body = ''; req.on('data', (c) => { body += c; }); req.on('end', () => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(authCall(JSON.parse(body)))); }); return;
   }
   // Test-only public configuration, served from memory. The real online-config.js is never read or changed.
   if (url.pathname === '/online-config.js') { res.writeHead(200, { 'Content-Type': 'text/javascript' }); res.end("export const SUPABASE_URL='https://tt-e2e.invalid';export const SUPABASE_PUBLISHABLE_KEY='e2e';"); return; }
@@ -270,15 +316,81 @@ try {
     must(phone.errors.length === 0, 'page errors: ' + phone.errors.join('; '));
   });
 
+  let guest, guestId;
   await check('guest identity from the earlier version: existing seat opens; hosting or joining asks for an account', async () => {
-    const guestId = randomUUID(); sql(`insert into auth.users(id, is_anonymous) values ('${guestId}', true); update tt_rooms set state = jsonb_set(state, '{players,3}', state->'players'->3 || jsonb_build_object('uid', '${guestId}', 'isTestSeat', false, 'name', 'Old Guest')) where code='${code}'`);
-    const guest = await newPage(guestId, { anon: true }); await guest.goto(`?room=${code}`); await guest.wait(`document.querySelectorAll('#board .cell').length === 64`, 'guest seat opens');
+    guestId = randomUUID(); sql(`insert into auth.users(id, is_anonymous) values ('${guestId}', true); update tt_rooms set state = jsonb_set(state, '{players,3}', state->'players'->3 || jsonb_build_object('uid', '${guestId}', 'isTestSeat', false, 'name', 'Old Guest')) where code='${code}'`);
+    guest = await newPage(guestId, { anon: true }); await guest.goto(`?room=${code}`); await guest.wait(`document.querySelectorAll('#board .cell').length === 64`, 'guest seat opens');
     await guest.view('settings'); must((await guest.text('#accountStatus')).startsWith('Guest identity'), 'guest status'); await guest.click('#leaveRoom');
     must(await guest.eval(`return !document.getElementById('guestPanel').hidden && document.getElementById('entryPanel').hidden && !document.getElementById('guestUpgradeNote').hidden === false || !document.getElementById('authPanel').hidden;`), 'guest should be offered an account, not the join form');
     let refused; try { callRpc(guestId, 'tt_create', {}); } catch (e) { refused = e.message; } must(/Create an account/.test(refused || ''), 'server allowed a guest to host');
   });
 
-  await check('no uncaught page errors in any session', async () => { const all = [...host.errors, ...ada.errors, ...bram.errors]; must(all.length === 0, all.join(' | ')); });
+  // ---------- accounts without an email ----------
+  const NO_EMAIL = '@players.turntactics.invalid', short = () => randomUUID().slice(0, 6), robinName = 'robin_' + short();
+  const feedback = (page) => page.text('#homeFeedback');
+  const submit = async (page, form) => { await page.eval(`document.getElementById('${form}').requestSubmit();`); await page.wait(`!document.getElementById('regUsername').disabled`, form + ' to finish'); };
+  const register = async (page, name, { display = 'Robin', password = 'correct horse', email = '' } = {}) => {
+    await page.click('#tabRegister'); await page.fill('#regUsername', name); await page.fill('#regDisplay', display); await page.fill('#regPassword', password); await page.fill('#regEmail', email);
+    await submit(page, 'registerForm');
+  };
+  const signedOut = async () => { const page = await newPage(null); await page.goto(); await page.wait(`!document.getElementById('authPanel').hidden`, 'sign-in panel'); return page; };
+  const robin = await signedOut();
+
+  await check('accounts: a username and password are enough — email is optional, the account is signed in at once and can host', async () => {
+    must(await robin.eval(`return !document.getElementById('regEmail').required && document.getElementById('regUsername').required && document.getElementById('regPassword').required;`), 'email must be optional; username and password required');
+    await robin.click('#tabRegister'); must(await robin.noOverflow(), 'horizontal overflow on the create-account form'); await robin.shot('12-create-account-mobile');
+    await register(robin, robinName); await robin.wait(`!document.getElementById('entryPanel').hidden`, 'signed in straight after registering: ' + await feedback(robin));
+    must(await robin.text('#whoAmI') === `Robin (@${robinName})` && await feedback(robin) === '', 'profile: ' + await robin.text('#whoAmI'));
+    must(sql(`select u.email from auth.users u join tt_profiles p on p.user_id = u.id where p.username = '${robinName}'`) === robinName + NO_EMAIL, 'placeholder address not stored');
+    await robin.click('#createRoom'); await robin.wait(`!document.getElementById('lobby').hidden`, 'an account without an email can host');
+  });
+
+  await check('accounts: sign out, then sign in again with the username; a wrong password gets one generic answer', async () => {
+    await robin.view('settings'); await robin.click('#signOut'); await robin.confirm();
+    await robin.wait(`!document.getElementById('authPanel').hidden && document.getElementById('homeFeedback').textContent === 'Signed out.'`, 'signed out');
+    await robin.click('#tabSignIn'); await robin.fill('#signInId', ` ${robinName.toUpperCase()} `); await robin.fill('#signInPassword', 'not the password'); await submit(robin, 'signInForm');
+    must((await feedback(robin)).startsWith('Those sign-in details did not match.') && await robin.eval(`return document.getElementById('entryPanel').hidden;`), 'wrong password: ' + await feedback(robin));
+    await robin.fill('#signInPassword', 'correct horse'); await submit(robin, 'signInForm');
+    must(await robin.eval(`return !document.getElementById('entryPanel').hidden;`) && await robin.text('#whoAmI') === `Robin (@${robinName})`, 'username sign-in: ' + await feedback(robin));
+  });
+
+  await check('accounts: a taken or reserved username is refused without leaving a half-made identity signed in', async () => {
+    const other = await signedOut();
+    await register(other, robinName, { display: 'Impostor', password: 'another password' }); must(/username is taken/.test(await feedback(other)), 'taken name: ' + await feedback(other));
+    must(sql(`select count(*) from auth.users where email = '${robinName + NO_EMAIL}'`) === '1', 'a second identity was created for a taken name');
+    // A name held by an account that signs in by email: Auth has no such address, only the profile table knows.
+    const held = sql(`select username from tt_profiles where user_id = '${H}'`);
+    await register(other, held, { display: 'Impostor' }); must(/username is taken/.test(await feedback(other)), 'name of an email account: ' + await feedback(other));
+    must(await other.eval(`return localStorage.getItem('e2e-user') === null && !document.getElementById('authPanel').hidden && document.getElementById('profileForm').hidden;`), 'left signed in as an identity that can never use the name');
+    await other.click('#tabSignIn'); await other.fill('#signInId', held); await other.fill('#signInPassword', 'correct horse'); await submit(other, 'signInForm');
+    must((await feedback(other)).includes('sign in with that email') && await other.eval(`return localStorage.getItem('e2e-user');`) === null, 'the same details signed in to the unusable identity');
+    await register(other, 'admin_1'); must(/reserved/.test(await feedback(other)) && sql(`select count(*) from auth.users where email like 'admin\\_1@%'`) === '0', 'reserved name reached the server: ' + await feedback(other));
+    must(other.errors.length === 0, 'page errors: ' + other.errors.join('; '));
+  });
+
+  await check('accounts: while the server still insists on confirming an email, registering without one says what to do and stores nothing', async () => {
+    const page = await signedOut(), name = 'wren_' + short();
+    authMode.confirmEmail = true; try { await register(page, name, { display: 'Wren' }); } finally { authMode.confirmEmail = false; }
+    must(/requires a confirmed email/.test(await feedback(page)) && await page.eval(`return document.getElementById('entryPanel').hidden;`), 'feedback: ' + await feedback(page));
+    must(sql(`select count(*) from auth.users where email = '${name + NO_EMAIL}'`) === '0' && page.errors.length === 0, 'an identity was stored, or the page failed: ' + page.errors.join('; '));
+  });
+
+  await check('email links: a failed link is explained, removed from the address bar, and never shown to the Auth library', async () => {
+    const page = await newPage(null); await page.goto('#error=access_denied&error_code=otp_expired&error_description=Email+link+is+invalid+or+has+expired&sb=');
+    await page.wait(`document.getElementById('homeFeedback').textContent.startsWith('That email link has expired or was already used.')`, 'explanation of the failed link');
+    must(await page.eval(`return location.hash === '' && window.__hashAtAuthStart === '' && !document.getElementById('authPanel').hidden;`), 'the error stayed in the address or reached the Auth library');
+    must(page.errors.length === 0, 'page errors: ' + page.errors.join('; '));
+  });
+
+  await check('guest upgrade without an email: the same identity becomes an account, keeps its seat and may now host', async () => {
+    const name = 'guest_' + short();
+    await register(guest, name, { display: 'Old Guest' }); await guest.wait(`!document.getElementById('entryPanel').hidden`, 'guest became an account: ' + await feedback(guest));
+    must(await guest.text('#whoAmI') === `Old Guest (@${name})` && (await feedback(guest)).startsWith('Account created.'), 'profile: ' + await guest.text('#whoAmI'));
+    must(sql(`select email || '|' || is_anonymous::int from auth.users where id = '${guestId}'`) === name + NO_EMAIL + '|0', 'identity not upgraded in place');
+    must(sql(`select state->'players'->3->>'uid' from tt_rooms where code = '${code}'`) === guestId && !!callRpc(guestId, 'tt_create', {}).code, 'seat lost, or hosting still refused');
+  });
+
+  await check('no uncaught page errors in any session', async () => { const all = [...host.errors, ...ada.errors, ...bram.errors, ...robin.errors, ...(guest?.errors || [])]; must(all.length === 0, all.join(' | ')); });
 } finally {
   chrome.kill(); server.close();
   const failed = results.filter((r) => r[0] === 'FAIL').length;
